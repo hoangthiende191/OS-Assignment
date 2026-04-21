@@ -71,7 +71,7 @@ struct vm_rg_struct *get_vm_area_node_at_brk(struct pcb_t *caller, int vmaid, ad
   // newrg->rg_start = ...
   // newrg->rg_end = ...
   */
-  struct vm_area_struct *cur_vma = get_vma_by_num(caller->krnl->mm, vmaid);
+  struct vm_area_struct *cur_vma = get_vma_by_num(caller->mm, vmaid);
 
   if (cur_vma == NULL) 
   {
@@ -106,7 +106,7 @@ int validate_overlap_vm_area(struct pcb_t *caller, int vmaid, addr_t vmastart, a
     return -1;
   }
 
-  struct vm_area_struct *vma = caller->krnl->mm->mmap;
+  struct vm_area_struct *vma = caller->mm->mmap;
   if (vma == NULL)
   {
     return -1;
@@ -114,7 +114,7 @@ int validate_overlap_vm_area(struct pcb_t *caller, int vmaid, addr_t vmastart, a
 
   /* TODO validate the planned memory area is not overlapped */
 
-  struct vm_area_struct *cur_area = get_vma_by_num(caller->krnl->mm, vmaid);
+  struct vm_area_struct *cur_area = get_vma_by_num(caller->mm, vmaid);
   if (cur_area == NULL)
   {
     return -1;
@@ -173,7 +173,6 @@ int inc_vma_limit(struct pcb_t *caller, int vmaid, addr_t inc_sz)
   {
     return -1;
   }
-
   inc_amt = PAGING_PAGE_ALIGNSZ(inc_sz);
   incnumpage = inc_amt / PAGING_PAGESZ;
   area = get_vm_area_node_at_brk(caller, vmaid, inc_sz, inc_amt);
@@ -183,7 +182,7 @@ int inc_vma_limit(struct pcb_t *caller, int vmaid, addr_t inc_sz)
     return -1;
   }
 
-  cur_vma = get_vma_by_num(caller->krnl->mm, vmaid);
+  cur_vma = get_vma_by_num(caller->mm, vmaid);
   if (cur_vma == NULL)
   {
     free(area);
@@ -232,53 +231,60 @@ addr_t vm_map_range(struct pcb_t *caller, addr_t astart, addr_t aend, addr_t map
   }
   return vm_map_ram(caller, astart, aend, mapstart, incpgnum, ret_rg);
 }
-
+static void put_back_contiguous_frames(struct memphy_struct *mram, struct framephy_struct *frm_lst)
+{
+  struct  framephy_struct *fpit = frm_lst;
+  while(fpit != NULL)
+  {
+    MEMPHY_put_freefp(mram,fpit->fpn);
+    fpit = fpit->fp_next;
+  }
+}
 addr_t vm_map_kernel(struct pcb_t *caller, addr_t astart, addr_t aend, addr_t mapstart, int incpgnum, struct vm_rg_struct *ret_rg)
 {
-  addr_t ret;
-  struct krnl_t *krnl;
-  struct mm_struct *mm;
-  if (caller == NULL || caller->krnl == NULL || ret_rg == NULL)
+  struct framephy_struct *frmlst = NULL;
+  struct mm_struct *user_mm = NULL;
+  addr_t mapsz;
+  int ret;
+  
+  if (caller == NULL || caller->krnl || ret_rg == NULL)
   {
     return -1;
   }
-  krnl = caller->krnl;
-  mm= krnl->mm;
-  if (mm == NULL)
+  if (caller->krnl->mram == NULL || caller->krnl->mm == NULL)
   {
     return -1;
   }
-  #ifdef MM64
+  if (incpgnum <= 0 || astart >= aend)
   {
-    addr_t *saved_pgd = mm->pgd;
-    addr_t *saved_p4d = mm->p4d;
-    addr_t *saved_pud = mm->pud;
-    addr_t *saved_pmd = mm->pmd;
-    addr_t *saved_pt  = mm->pt;
-
-    if (krnl->krnl_pgd != NULL) mm->pgd = krnl->krnl_pgd;
-    if (krnl->krnl_p4d != NULL) mm->p4d = krnl->krnl_p4d;
-    if (krnl->krnl_pud != NULL) mm->pud = krnl->krnl_pud;
-    if (krnl->krnl_pmd != NULL) mm->pmd = krnl->krnl_pmd;
-    if (krnl->krnl_pt  != NULL) mm->pt  = krnl->krnl_pt;
-
-    ret = vm_map_range(caller,astart,aend,mapstart,incpgnum,ret_rg);
-    mm->pgd = saved_pgd;
-    mm->p4d = saved_p4d;
-    mm->pud = saved_pud;
-    mm->pmd = saved_pmd;
-    mm->pt = saved_pt;
+    return -1;
   }
-  #else
+  mapsz = (addr_t)incpgnum* PAGING_PAGESZ;
+  if (mapstart < astart || (mapstart + mapsz) > aend)
   {
-    uint32_t *savedpgd = mm->pgd;
-    if (krnl->krnl_pgd != NULL)
-    {
-      mm->pgd = krnl->krnl_pgd;
-    }
-    ret = vm_map_range(caller, astart, aend, mapstart, incpgnum, ret_rg);
+    return -1;
   }
-  #endif
-  return ret;
+
+  /* get contiguous physical mem*/
+  ret = MEMPHY_get_contiguous_freefp(caller->krnl->mram, incpgnum, &frmlst);
+  if (ret != 0 || frmlst == NULL)
+  {
+    return -1;
+  }
+  user_mm = caller->mm;
+  caller->mm = caller->krnl->mm;
+
+  ret = vm_map_range(caller, mapstart, incpgnum, frmlst, ret_rg);
+  caller->mm = user_mm;
+  if (ret < 0)
+  {
+    put_back_contiguous_frames(caller->krnl->mram,frmlst);
+    return -1;
+  }
+  ret_rg->rg_start = mapstart;
+  ret_rg->rg_end = mapstart + mapsz;
+  ret_rg->mode_bit = 0;
+
+  return 0;
 }
 // #endif
