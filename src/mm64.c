@@ -22,6 +22,13 @@
 
 #if defined(MM64)
 
+// Helper function to check page table of kernel or user
+addr_t* get_pgd_root(struct pcb_t *caller, addr_t pgd_idx) {
+    if (pgd_idx == 511) return caller->krnl->krnl_pgd;
+    if (caller->mm == NULL) return NULL;
+    return caller->mm->pgd;
+}
+
 /*
  * init_pte - Initialize PTE entry
  */
@@ -78,6 +85,11 @@ int get_pd_from_address(addr_t addr, addr_t *pgd, addr_t *p4d, addr_t *pud, addr
 	*pud = (addr & PAGING64_ADDR_PUD_MASK) >> PAGING64_ADDR_PUD_LOBIT;
 	*pmd = (addr & PAGING64_ADDR_PMD_MASK) >> PAGING64_ADDR_PMD_LOBIT;
 	*pt = (addr & PAGING64_ADDR_PT_MASK) >> PAGING64_ADDR_PT_LOBIT;
+	*pgd = PAGING64_ADDR_PGD(addr);
+	*p4d = PAGING64_ADDR_P4D(addr);
+	*pud = PAGING64_ADDR_PUD(addr);
+	*pmd = PAGING64_ADDR_PMD(addr);
+	*pt  = PAGING64_ADDR_PT(addr);
 
 	/* TODO: implement the page direactories mapping */
 
@@ -108,48 +120,45 @@ int get_pd_from_pagenum(addr_t pgn, addr_t *pgd, addr_t *p4d, addr_t *pud, addr_
  */
 int pte_set_swap(struct pcb_t *caller, addr_t pgn, int swptyp, addr_t swpoff)
 {
-	struct mm_struct *mm = caller->mm;
 	addr_t pgd_idx, p4d_idx, pud_idx, pmd_idx, pt_idx;
+    get_pd_from_pagenum(pgn, &pgd_idx, &p4d_idx, &pud_idx, &pmd_idx, &pt_idx);
 
-	get_pd_from_pagenum(pgn, &pgd_idx, &p4d_idx, &pud_idx, &pmd_idx, &pt_idx);
+    addr_t *pgd_root = get_pgd_root(caller, pgd_idx);
+    if (pgd_root == NULL) return -1;
 
 #ifdef MM64
 	// 5 -> 4
-	if (mm->pgd[pgd_idx] == 0)
-	{
-		addr_t *new_p4d = malloc(PAGING64_PAGESZ);
-		memset(new_p4d, 0, PAGING64_PAGESZ);
-		mm->pgd[pgd_idx] = (addr_t)new_p4d;
-	}
-	addr_t *p4d = (addr_t *)(mm->pgd[pgd_idx]);
+    if (pgd_root[pgd_idx] == 0) {
+        addr_t *new_p4d = malloc(PAGING64_PAGESZ);
+        memset(new_p4d, 0, PAGING64_PAGESZ);
+        pgd_root[pgd_idx] = (addr_t)new_p4d;
+    }
+    addr_t *p4d = (addr_t *)(pgd_root[pgd_idx]);
 
-	// 4 -> 3
-	if (p4d[p4d_idx] == 0)
-	{
-		addr_t *new_pud = malloc(PAGING64_PAGESZ);
-		memset(new_pud, 0, PAGING64_PAGESZ);
-		p4d[p4d_idx] = (addr_t)new_pud;
-	}
-	addr_t *pud = (addr_t *)(p4d[p4d_idx]);
+    // 4 -> 3
+    if (p4d[p4d_idx] == 0) {
+        addr_t *new_pud = malloc(PAGING64_PAGESZ);
+        memset(new_pud, 0, PAGING64_PAGESZ);
+        p4d[p4d_idx] = (addr_t)new_pud;
+    }
+    addr_t *pud = (addr_t *)(p4d[p4d_idx]);
 
-	// 3 -> 2
-	if (pud[pud_idx] == 0)
-	{
-		addr_t *new_pmd = malloc(PAGING64_PAGESZ);
-		memset(new_pmd, 0, PAGING64_PAGESZ);
-		pud[pud_idx] = (addr_t)new_pmd;
-	}
-	addr_t *pmd = (addr_t *)(pud[pud_idx]);
+    // 3 -> 2
+    if (pud[pud_idx] == 0) {
+        addr_t *new_pmd = malloc(PAGING64_PAGESZ);
+        memset(new_pmd, 0, PAGING64_PAGESZ);
+        pud[pud_idx] = (addr_t)new_pmd;
+    }
+    addr_t *pmd = (addr_t *)(pud[pud_idx]);
 
-	// 2 -> 1
-	if (pmd[pmd_idx] == 0)
-	{
-		addr_t *new_pt = malloc(PAGING64_PAGESZ);
-		memset(new_pt, 0, PAGING64_PAGESZ);
-		pmd[pmd_idx] = (addr_t)new_pt;
-	}
-	addr_t *pt = (addr_t *)(pmd[pmd_idx]);
-	addr_t *pte = &pt[pt_idx]; // Set PTE
+    // 2 -> 1
+    if (pmd[pmd_idx] == 0) {
+        addr_t *new_pt = malloc(PAGING64_PAGESZ);
+        memset(new_pt, 0, PAGING64_PAGESZ);
+        pmd[pmd_idx] = (addr_t)new_pt;
+    }
+    addr_t *pt = (addr_t *)(pmd[pmd_idx]);
+    addr_t *pte = &pt[pt_idx];
 #else
 	uint32_t *pte = (uint32_t *)&mm->pgd[pgn];
 #endif
@@ -169,48 +178,45 @@ int pte_set_swap(struct pcb_t *caller, addr_t pgn, int swptyp, addr_t swpoff)
  */
 int pte_set_fpn(struct pcb_t *caller, addr_t pgn, addr_t fpn)
 {
-	struct mm_struct *mm = caller->mm;
 	addr_t pgd_idx, p4d_idx, pud_idx, pmd_idx, pt_idx;
+    get_pd_from_pagenum(pgn, &pgd_idx, &p4d_idx, &pud_idx, &pmd_idx, &pt_idx);
 
-	get_pd_from_pagenum(pgn, &pgd_idx, &p4d_idx, &pud_idx, &pmd_idx, &pt_idx);
+    addr_t *pgd_root = get_pgd_root(caller, pgd_idx);
+    if (pgd_root == NULL) return -1;
 
 #ifdef MM64
 	// 5 -> 4
-	if (mm->pgd[pgd_idx] == 0)
-	{
-		addr_t *new_p4d = malloc(PAGING64_PAGESZ);
-		memset(new_p4d, 0, PAGING64_PAGESZ);
-		mm->pgd[pgd_idx] = (addr_t)new_p4d;
-	}
-	addr_t *p4d = (addr_t *)(mm->pgd[pgd_idx]);
+    if (pgd_root[pgd_idx] == 0) {
+        addr_t *new_p4d = malloc(PAGING64_PAGESZ);
+        memset(new_p4d, 0, PAGING64_PAGESZ);
+        pgd_root[pgd_idx] = (addr_t)new_p4d;
+    }
+    addr_t *p4d = (addr_t *)(pgd_root[pgd_idx]);
 
-	// 4 -> 3
-	if (p4d[p4d_idx] == 0)
-	{
-		addr_t *new_pud = malloc(PAGING64_PAGESZ);
-		memset(new_pud, 0, PAGING64_PAGESZ);
-		p4d[p4d_idx] = (addr_t)new_pud;
-	}
-	addr_t *pud = (addr_t *)(p4d[p4d_idx]);
+    // 4 -> 3
+    if (p4d[p4d_idx] == 0) {
+        addr_t *new_pud = malloc(PAGING64_PAGESZ);
+        memset(new_pud, 0, PAGING64_PAGESZ);
+        p4d[p4d_idx] = (addr_t)new_pud;
+    }
+    addr_t *pud = (addr_t *)(p4d[p4d_idx]);
 
-	// 3 -> 2
-	if (pud[pud_idx] == 0)
-	{
-		addr_t *new_pmd = malloc(PAGING64_PAGESZ);
-		memset(new_pmd, 0, PAGING64_PAGESZ);
-		pud[pud_idx] = (addr_t)new_pmd;
-	}
-	addr_t *pmd = (addr_t *)(pud[pud_idx]);
+    // 3 -> 2
+    if (pud[pud_idx] == 0) {
+        addr_t *new_pmd = malloc(PAGING64_PAGESZ);
+        memset(new_pmd, 0, PAGING64_PAGESZ);
+        pud[pud_idx] = (addr_t)new_pmd;
+    }
+    addr_t *pmd = (addr_t *)(pud[pud_idx]);
 
-	// 2 -> 1
-	if (pmd[pmd_idx] == 0)
-	{
-		addr_t *new_pt = malloc(PAGING64_PAGESZ);
-		memset(new_pt, 0, PAGING64_PAGESZ);
-		pmd[pmd_idx] = (addr_t)new_pt;
-	}
-	addr_t *pt = (addr_t *)(pmd[pmd_idx]);
-	addr_t *pte = &pt[pt_idx]; // Set PTE
+    // 2 -> 1
+    if (pmd[pmd_idx] == 0) {
+        addr_t *new_pt = malloc(PAGING64_PAGESZ);
+        memset(new_pt, 0, PAGING64_PAGESZ);
+        pmd[pmd_idx] = (addr_t)new_pt;
+    }
+    addr_t *pt = (addr_t *)(pmd[pmd_idx]);
+    addr_t *pte = &pt[pt_idx];
 #else
 	uint32_t *pte = (uint32_t *)&mm->pgd[pgn];
 #endif
@@ -229,28 +235,24 @@ int pte_set_fpn(struct pcb_t *caller, addr_t pgn, addr_t fpn)
  **/
 uint32_t pte_get_entry(struct pcb_t *caller, addr_t pgn)
 {
-	struct mm_struct *mm = caller->mm;
 	addr_t pgd_idx, p4d_idx, pud_idx, pmd_idx, pt_idx;
+    get_pd_from_pagenum(pgn, &pgd_idx, &p4d_idx, &pud_idx, &pmd_idx, &pt_idx);
 
-	get_pd_from_pagenum(pgn, &pgd_idx, &p4d_idx, &pud_idx, &pmd_idx, &pt_idx);
+    /* Determine the root based on address high bits */
+    addr_t *pgd_root = get_pgd_root(caller, pgd_idx);
+    if (pgd_root == NULL || pgd_root[pgd_idx] == 0) return 0;
 
-	if (mm->pgd == NULL || mm->pgd[pgd_idx] == 0)
-		return 0; // Level 5
+    addr_t *p4d = (addr_t *)(pgd_root[pgd_idx]);
+    if (p4d[p4d_idx] == 0) return 0;
 
-	addr_t *p4d = (addr_t *)(mm->pgd[pgd_idx]); // Level 4
-	if (p4d[p4d_idx] == 0)
-		return 0;
+    addr_t *pud = (addr_t *)(p4d[p4d_idx]);
+    if (pud[pud_idx] == 0) return 0;
 
-	addr_t *pud = (addr_t *)(p4d[p4d_idx]); // Level 3
-	if (pud[pud_idx] == 0)
-		return 0;
+    addr_t *pmd = (addr_t *)(pud[pud_idx]);
+    if (pmd[pmd_idx] == 0) return 0;
 
-	addr_t *pmd = (addr_t *)(pud[pud_idx]); // Level 2
-	if (pmd[pmd_idx] == 0)
-		return 0;
-
-	addr_t *pt = (addr_t *)(pmd[pmd_idx]); // Level 1
-	return (uint32_t)(pt[pt_idx]);
+    addr_t *pt = (addr_t *)(pmd[pmd_idx]);
+    return (uint32_t)(pt[pt_idx]);
 }
 
 /* Set PTE page table entry
@@ -260,14 +262,14 @@ uint32_t pte_get_entry(struct pcb_t *caller, addr_t pgn)
  **/
 int pte_set_entry(struct pcb_t *caller, addr_t pgn, uint32_t pte_val)
 {
-	struct mm_struct *mm = caller->mm;
 	addr_t pgd_idx, p4d_idx, pud_idx, pmd_idx, pt_idx;
 
 	get_pd_from_pagenum(pgn, &pgd_idx, &p4d_idx, &pud_idx, &pmd_idx, &pt_idx);
 
-	if (mm->pgd == NULL || mm->pgd[pgd_idx] == 0)
+	addr_t *pgd_root = get_pgd_root(caller, pgd_idx);
+	if (pgd_root == NULL || pgd_root[pgd_idx] == 0)
 		return -1;
-	addr_t *p4d = (addr_t *)(mm->pgd[pgd_idx]);
+	addr_t *p4d = (addr_t *)(pgd_root[pgd_idx]);
 	if (p4d[p4d_idx] == 0)
 		return -1;
 	addr_t *pud = (addr_t *)(p4d[p4d_idx]);
@@ -289,28 +291,28 @@ int vmap_pgd_memset(struct pcb_t *caller, // process call
 					addr_t addr,		  // start address which is aligned to pagesz
 					int pgnum)			  // num of mapping page
 {
-	int pgit;
 	uint32_t pattern = 0xdeadbeef;
+    for (int pgit = 0; pgit < pgnum; pgit++) {
+        addr_t current_vaddr = addr + (pgit * PAGING64_PAGESZ);
+        addr_t pgn = PAGING_PGN(current_vaddr);
 
-	for (pgit = 0; pgit < pgnum; pgit++)
-	{
-		addr_t current_vaddr = addr + (pgit * PAGING64_PAGESZ);
-		addr_t pgn = PAGING_PGN(current_vaddr);
+        addr_t pgd_idx, p4d_idx, pud_idx, pmd_idx, pt_idx;
+        get_pd_from_pagenum(pgn, &pgd_idx, &p4d_idx, &pud_idx, &pmd_idx, &pt_idx);
 
-		pte_set_fpn(caller, pgn, 0);
-
-		// Fetch + override
-		addr_t pgd_idx, p4d_idx, pud_idx, pmd_idx, pt_idx;
-		get_pd_from_pagenum(pgn, &pgd_idx, &p4d_idx, &pud_idx, &pmd_idx, &pt_idx);
-
-		addr_t *p4d = (addr_t *)(caller->mm->pgd[pgd_idx]);
-		addr_t *pud = (addr_t *)(p4d[p4d_idx]);
-		addr_t *pmd = (addr_t *)(pud[pud_idx]);
-		addr_t *pt = (addr_t *)(pmd[pmd_idx]);
-		pt[pt_idx] = pattern;
-	}
-
-	return 0;
+        /* Use helper to find correct root */
+        addr_t *pgd_root = get_pgd_root(caller, pgd_idx);
+        
+        /* Ensure the PT exists using the setter first */
+        pte_set_fpn(caller, pgn, 0); 
+        
+        /* Walk down and overwrite the final PTE */
+        addr_t *p4d = (addr_t *)(pgd_root[pgd_idx]);
+        addr_t *pud = (addr_t *)(p4d[p4d_idx]);
+        addr_t *pmd = (addr_t *)(pud[pud_idx]);
+        addr_t *pt  = (addr_t *)(pmd[pmd_idx]);
+        pt[pt_idx] = pattern;
+    }
+    return 0;
 }
 
 /*
@@ -345,8 +347,10 @@ addr_t vmap_page_range(struct pcb_t *caller,		   // process call
 		// 3. Build the PTE
 		pte_set_fpn(caller, pgn, fpit->fpn);
 
-		// To track FIFO, maybe
-		enlist_pgn_node(&caller->mm->fifo_pgn, pgn);
+		// Only enlist user pages into the FIFO swap queue, not pinned kernel pages
+		if (caller->krnl == NULL || caller->mm != caller->krnl->mm) {
+			enlist_pgn_node(&caller->mm->fifo_pgn, pgn);
+		}
 
 		fpit = fpit->fp_next;
 	}
@@ -638,12 +642,12 @@ int print_pgtbl(struct pcb_t *caller, addr_t start, addr_t end)
 	/* TODO traverse the page map and dump the page directory entries */
 	printf("print_pgtbl:\n");
 
-	struct mm_struct *mm = caller->mm;
-	if (mm == NULL || mm->pgd == NULL) {
+	addr_t *pgd_root = get_pgd_root(caller, pgd);
+	if (pgd_root == NULL) {
 		return 0;
 	}
 
-	addr_t pdg_val = mm->pgd[pgd];
+	addr_t pdg_val = pgd_root[pgd];
 	addr_t p4g_val = 0;
 	addr_t pud_val = 0;
 	addr_t pmd_val = 0;
