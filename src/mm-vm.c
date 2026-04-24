@@ -252,7 +252,7 @@ addr_t vm_map_kernel(struct pcb_t *caller, addr_t astart, addr_t aend, addr_t ma
 	{
 		return -1;
 	}
-	if (caller->krnl->mram == NULL || caller->krnl->mm == NULL)
+	if (caller->krnl->mram == NULL)
 	{
 		return -1;
 	}

@@ -185,4 +185,6 @@ int print_list_vma(struct vm_area_struct *rg);
 
 int print_list_pgn(struct pgn_t *ip);
 int print_pgtbl(struct pcb_t *ip, addr_t start, addr_t end);
+
+addr_t* get_pgd_root(struct pcb_t *caller, addr_t pgd_idx);
 #endif
