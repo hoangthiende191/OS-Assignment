@@ -151,7 +151,7 @@ int pte_set_swap(struct pcb_t *caller, addr_t pgn, int swptyp, addr_t swpoff)
 	addr_t *pt = (addr_t *)(pmd[pmd_idx]);
 	addr_t *pte = &pt[pt_idx]; // Set PTE
 #else
-	pte = &krnl->mm->pgd[pgn];
+	uint32_t *pte = (uint32_t *)&mm->pgd[pgn];
 #endif
 
 	SETBIT(*pte, PAGING_PTE_PRESENT_MASK);
@@ -212,7 +212,7 @@ int pte_set_fpn(struct pcb_t *caller, addr_t pgn, addr_t fpn)
 	addr_t *pt = (addr_t *)(pmd[pmd_idx]);
 	addr_t *pte = &pt[pt_idx]; // Set PTE
 #else
-	pte = &krnl->mm->pgd[pgn];
+	uint32_t *pte = (uint32_t *)&mm->pgd[pgn];
 #endif
 
 	SETBIT(*pte, PAGING_PTE_PRESENT_MASK);
@@ -389,6 +389,16 @@ addr_t alloc_pages_range(struct pcb_t *caller, int req_pgnum, struct framephy_st
 		}
 		else
 		{
+			/* Clean up already allocated frames to avoid memory leaks */
+			struct framephy_struct *curr = *frm_lst;
+			while (curr != NULL)
+			{
+				struct framephy_struct *next = curr->fp_next;
+				MEMPHY_put_freefp(caller->krnl->mram, curr->fpn);
+				free(curr);
+				curr = next;
+			}
+			*frm_lst = NULL;
 			return -3000; // Error code
 		}
 	}
