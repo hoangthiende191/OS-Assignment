@@ -220,7 +220,7 @@ int __free(struct pcb_t *caller, int vmaid, int rgid)
     rgnode->rg_next = NULL;
 
     /*enlist the obsoleted memory region */
-    
+ 
     pthread_mutex_unlock(&mmvm_lock);
     return 0;
 }
@@ -723,24 +723,46 @@ int libkmem_cache_pool_create(struct pcb_t *caller, uint32_t size, uint32_t alig
 {
     /* TODO: provide OS level management */
 
-    if (caller == NULL || caller->mm == NULL)
+    if (caller == NULL || caller->krnl == NULL || caller->krnl->mm == NULL)
         return -1;
 
     struct krnl_t *krnl = caller->krnl;
     struct mm_struct *mm = krnl->mm;
     struct kcache_pool_struct *pool = &mm->kcpooltbl[cache_pool_id];
-    if (pool == NULL) {
-        pool = (struct kcache_pool_struct*)malloc(sizeof(struct kcache_pool_struct));
+
+    /* Fix Minimum Size Corruption Risk: Object must be large enough to hold the next free pointer */
+    if (size < sizeof(addr_t)) {
+        size = sizeof(addr_t);
     }
+
+    /* Fix Ignored Alignment: Pad the size to strictly respect the alignment boundaries */
+    if (align > 0 && (size % align) != 0) {
+        size = size + (align - (size % align));
+    }
+
     pool->size = size;
     pool->align = align;
+    pool->storage = 0;
 
-    krnl->krnl_pgd;
-    // krnl->krnl_pgd;
-
-    // struct krnl_t *krnl = caller->krnl;
-    // krnl->kcpooltbl...
-    // krnl->krnl_pgd ...
+    /* Pre-allocate the first slab (1 page) to keep multiple copies ready */
+    addr_t new_slab_addr;
+    if (__kmalloc(caller, 0, -1, PAGING64_PAGESZ, &new_slab_addr) == 0)
+    {
+        int num_objs = PAGING64_PAGESZ / pool->size;
+        if (num_objs > 0) {
+            pool->storage = new_slab_addr;
+            for (int i = 0; i < num_objs; i++)
+            {
+                addr_t curr_slot = new_slab_addr + i * pool->size;
+                addr_t next_slot = (i == num_objs - 1) ? 0 : (curr_slot + pool->size);
+                
+                /* Write the pointer to the next free slot right into the current slot's memory space */
+                for (int b = 0; b < sizeof(addr_t); b++) {
+                    k_pg_setval(mm, curr_slot + b, ((BYTE *)&next_slot)[b], caller);
+                }
+            }
+        }
+    }
 
     return 0;
 }
@@ -753,15 +775,14 @@ int libkmem_cache_pool_create(struct pcb_t *caller, uint32_t size, uint32_t alig
  */
 int libkmem_cache_alloc(struct pcb_t *proc, uint32_t cache_pool_id, uint32_t reg_index)
 {
-    /* TODO: provide OS level management
-     *       and forward the request to helper
-     */
-    addr_t addr = __kmem_cache_alloc(proc, -1, reg_index, cache_pool_id, &addr);
-
-    // krnl->kcpooltbl...
-    // krnl->krnl_pgd ...
-
-    return 0;
+    addr_t addr;
+    /* Use the default kernel VMA (0) instead of -1 */
+    if (__kmem_cache_alloc(proc, 0, reg_index, cache_pool_id, &addr) == 0)
+    {
+        proc->regs[reg_index] = addr;
+        return 0;
+    }
+    return -1;
 }
 
 /*kmem_cache_alloc - alloc region memory in kmem cache
@@ -775,32 +796,29 @@ int libkmem_cache_alloc(struct pcb_t *proc, uint32_t cache_pool_id, uint32_t reg
 addr_t __kmem_cache_alloc(struct pcb_t *caller, int vmaid, int rgid, int cache_pool_id, addr_t *alloc_addr)
 {
 
-
+    pthread_mutex_lock(&mmvm_lock);
     struct mm_struct *mm = caller->krnl->mm;
     struct kcache_pool_struct *pool = &mm->kcpooltbl[cache_pool_id];
 
-    if (pool->storage != 0)
+    if (pool->storage == 0)
     {
-        addr_t res_addr = pool->storage;
-        addr_t next_free;
-
-        __read_kernel_mem(caller, vmaid, rgid, res_addr, (BYTE *)&next_free);
-
-        pool->storage = next_free;
-
-        *alloc_addr = res_addr;
-        return 0;
-    }
-    addr_t new_slab_addr;
-    if (__kmalloc(caller, vmaid, rgid, PAGING64_PAGESZ, &new_slab_addr) != 0)
-        return 0;
-
-    int num_objs = PAGING64_PAGESZ / pool->size;
-    for (int i = 1; i < num_objs; i++)
-    {
-        // addr_t curr_slot = new_slab_addr + i * pool;
+        /* Cache pool is exhausted or not initialized properly */
+        pthread_mutex_unlock(&mmvm_lock);
+        return -1;
     }
 
+    addr_t res_addr = pool->storage;
+    addr_t next_free = 0;
+
+    /* Safely read the entire addr_t pointer byte-by-byte via direct PT mapping */
+    for (int i = 0; i < sizeof(addr_t); i++) {
+        k_pg_getval(mm, res_addr + i, ((BYTE *)&next_free) + i, caller);
+    }
+
+    pool->storage = next_free;
+    *alloc_addr = res_addr;
+
+    pthread_mutex_unlock(&mmvm_lock);
     return 0;
 }
 
@@ -967,7 +985,7 @@ int free_pcb_memph(struct pcb_t *caller) // TODO: review concept of demand pagin
     while (vma != NULL)
     {
         for (addr_t vaddr = vma->vm_start; vaddr < vma->vm_end; vaddr+=PAGING64_PAGESZ) {
-            addr_t pgn = PAGING64_PGN(vaddr);
+            addr_t pgn = PAGING_PGN(vaddr);
             
             pte = pte_get_entry(caller, pgn);
 
