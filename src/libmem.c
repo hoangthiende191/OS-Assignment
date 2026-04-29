@@ -645,6 +645,22 @@ addr_t __kmalloc(struct pcb_t *caller, int vmaid, int rgid, addr_t size, addr_t 
     
     pthread_mutex_lock(&mmvm_lock);
     struct mm_struct *krnl_mm = caller->krnl->mm;
+
+    /* Find an empty symbol region in the table instead of using the passed rgid */
+    rgid = -1;
+    for (int i = 0; i < PAGING_MAX_SYMTBL_SZ; i++)
+    {
+        if (krnl_mm->symrgtbl[i].rg_start == 0 && krnl_mm->symrgtbl[i].rg_end == 0)
+        {
+            rgid = i;
+            break;
+        }
+    }
+    if (rgid == -1)
+    {
+        pthread_mutex_unlock(&mmvm_lock);
+        return 0x0;
+    }
     
     struct vm_area_struct *cur_vma = get_vma_by_num(krnl_mm, vmaid);
     struct vm_rg_struct ret_rg;
@@ -666,43 +682,29 @@ addr_t __kmalloc(struct pcb_t *caller, int vmaid, int rgid, addr_t size, addr_t 
         }
         else
         {
-           ret_rg.rg_start = old_sbrk;
-           ret_rg.rg_end = old_sbrk + size;
-           ret_rg.vmaid = vmaid;
+            ret_rg.rg_start = old_sbrk;
+            ret_rg.rg_end = old_sbrk + size;
+            ret_rg.vmaid = vmaid;
 
-           // Elist the free space between region end and sbrk
-           if (old_sbrk + size < cur_vma->sbrk)
-           {
-               struct vm_rg_struct *leftover_rg = malloc(sizeof(struct vm_rg_struct));
-               if (leftover_rg != NULL)
-               {
-                   leftover_rg->rg_start = old_sbrk + size;
-                   leftover_rg->rg_end = cur_vma->sbrk;
-                   leftover_rg->vmaid = cur_vma->vm_id;
-                   leftover_rg->mode_bit = 0; /* Kernel mode */
-                   leftover_rg->rg_next = NULL;
-                   enlist_vm_freerg_list(caller->krnl->mm, leftover_rg);
-               }
-           }
+            // Elist the free space between region end and sbrk
+            if (old_sbrk + size < cur_vma->sbrk)
+            {
+                struct vm_rg_struct *leftover_rg = malloc(sizeof(struct vm_rg_struct));
+                if (leftover_rg != NULL)
+                {
+                    leftover_rg->rg_start = old_sbrk + size;
+                    leftover_rg->rg_end = cur_vma->sbrk;
+                    leftover_rg->vmaid = cur_vma->vm_id;
+                    leftover_rg->mode_bit = 0; /* Kernel mode */
+                    leftover_rg->rg_next = NULL;
+                    enlist_vm_freerg_list(caller->krnl->mm, leftover_rg);
+                }
+            }
         }
 
     }
     
-    /* Find an empty symbol region in the table instead of using the passed rgid */
-    rgid = -1;
-    for (int i = 0; i < PAGING_MAX_SYMTBL_SZ; i++)
-    {
-        if (krnl_mm->symrgtbl[i].rg_start == 0 && krnl_mm->symrgtbl[i].rg_end == 0)
-        {
-            rgid = i;
-            break;
-        }
-    }
-    if (rgid == -1)
-    {
-        pthread_mutex_unlock(&mmvm_lock);
-        return 0x0;
-    }
+    
     krnl_mm->symrgtbl[rgid].rg_start = ret_rg.rg_start;
     krnl_mm->symrgtbl[rgid].rg_end = ret_rg.rg_end;
     krnl_mm->symrgtbl[rgid].vmaid = ret_rg.vmaid;
@@ -713,6 +715,51 @@ addr_t __kmalloc(struct pcb_t *caller, int vmaid, int rgid, addr_t size, addr_t 
     return 0;
 
 }
+
+
+int __slab_alloc(struct pcb_t *caller, struct kcache_pool_struct *pool)
+{
+    /* Dynamically determine slab size */
+    int min_objs = 8;
+    addr_t required_size = pool->size * min_objs + pool->align;
+    addr_t slab_size = PAGING64_PAGE_ALIGNSZ(required_size);
+
+    addr_t new_slab_addr;
+    if (__kmalloc(caller, 0, -1, slab_size, &new_slab_addr) != 0)
+    {
+        return -1;
+    }
+    addr_t aligned_start = new_slab_addr;
+    if (pool->align > 0 && (aligned_start % pool->align) != 0) {
+        aligned_start += (pool->align - (aligned_start % pool->align));
+    }
+    
+    int usable_space = slab_size - (aligned_start - new_slab_addr);
+    int num_objs = usable_space / pool->size;
+
+    if (num_objs <= 0) {
+        return -1;
+    }
+
+    struct slab_struct *new_slab = malloc(sizeof(struct slab_struct));
+    new_slab->addr = aligned_start;
+    new_slab->free_list = malloc(num_objs * sizeof(struct free_obj));
+    new_slab->storage = 0;
+    
+    for (int i = 0; i < num_objs; i++)
+    {
+        new_slab->free_list[i].addr = aligned_start + i * pool->size;
+        new_slab->free_list[i].next = (i < num_objs - 1) ? i + 1 : -1;
+    }
+
+    pthread_mutex_lock(&mmvm_lock);
+    new_slab->next = pool->slabs;
+    pool->slabs = new_slab;
+    pool->storage = 0;
+    pthread_mutex_unlock(&mmvm_lock);
+    return 0;
+}
+
 /*libkmem_cache_pool_create - create cache pool in kmem
  *@caller: caller
  *@size: memory size
@@ -722,7 +769,7 @@ addr_t __kmalloc(struct pcb_t *caller, int vmaid, int rgid, addr_t size, addr_t 
 int libkmem_cache_pool_create(struct pcb_t *caller, uint32_t size, uint32_t align, uint32_t cache_pool_id)
 {
     /* TODO: provide OS level management */
-
+    pthread_mutex_lock(&mmvm_lock);
     if (caller == NULL || caller->krnl == NULL || caller->krnl->mm == NULL)
         return -1;
 
@@ -742,29 +789,11 @@ int libkmem_cache_pool_create(struct pcb_t *caller, uint32_t size, uint32_t alig
 
     pool->size = size;
     pool->align = align;
-    pool->storage = 0;
+    pool->storage = (addr_t) -1;
+    pthread_mutex_unlock(&mmvm_lock);
 
     /* Pre-allocate the first slab (1 page) to keep multiple copies ready */
-    addr_t new_slab_addr;
-    if (__kmalloc(caller, 0, -1, PAGING64_PAGESZ, &new_slab_addr) == 0)
-    {
-        int num_objs = PAGING64_PAGESZ / pool->size;
-        if (num_objs > 0) {
-            pool->storage = new_slab_addr;
-            for (int i = 0; i < num_objs; i++)
-            {
-                addr_t curr_slot = new_slab_addr + i * pool->size;
-                addr_t next_slot = (i == num_objs - 1) ? 0 : (curr_slot + pool->size);
-                
-                /* Write the pointer to the next free slot right into the current slot's memory space */
-                for (int b = 0; b < sizeof(addr_t); b++) {
-                    k_pg_setval(mm, curr_slot + b, ((BYTE *)&next_slot)[b], caller);
-                }
-            }
-        }
-    }
-
-    return 0;
+    return __slab_alloc(caller, pool);
 }
 
 /*libkmem_cache_alloc - allocate cache slot in cache pool, cache slot has identical size
@@ -800,23 +829,57 @@ addr_t __kmem_cache_alloc(struct pcb_t *caller, int vmaid, int rgid, int cache_p
     struct mm_struct *mm = caller->krnl->mm;
     struct kcache_pool_struct *pool = &mm->kcpooltbl[cache_pool_id];
 
-    if (pool->storage == 0)
+    /* Find an empty symbol region in the table instead of using the passed rgid */
+    rgid = -1;
+    for (int i = 0; i < PAGING_MAX_SYMTBL_SZ; i++)
     {
-        /* Cache pool is exhausted or not initialized properly */
+        if (mm->symrgtbl[i].rg_start == 0 && mm->symrgtbl[i].rg_end == 0)
+        {
+            rgid = i;
+            break;
+        }
+    }
+    if (rgid == -1)
+    {
         pthread_mutex_unlock(&mmvm_lock);
         return -1;
     }
 
-    addr_t res_addr = pool->storage;
-    addr_t next_free = 0;
-
-    /* Safely read the entire addr_t pointer byte-by-byte via direct PT mapping */
-    for (int i = 0; i < sizeof(addr_t); i++) {
-        k_pg_getval(mm, res_addr + i, ((BYTE *)&next_free) + i, caller);
+    if (pool->slabs == NULL)
+    {
+        /* Cache pool is not initialized properly */
+        pthread_mutex_unlock(&mmvm_lock);
+        return -1;
     }
 
-    pool->storage = next_free;
-    *alloc_addr = res_addr;
+    struct slab_struct *slab = NULL;
+    while (1)
+    {
+        slab = pool->slabs;
+        while (slab != NULL && slab->storage == (addr_t) -1)
+        {
+            slab = slab->next;
+        }
+        
+        if (slab != NULL)
+            break; /* Found a slab with free space */
+            
+        /* Cache pool is exhausted, allocate new slab */
+        pthread_mutex_unlock(&mmvm_lock);
+        if (__slab_alloc(caller, pool) < 0)
+            return -1;
+        pthread_mutex_lock(&mmvm_lock);
+    }
+
+    int free_idx = (int)slab->storage;
+    *alloc_addr = slab->free_list[free_idx].addr;
+    slab->storage = (addr_t)slab->free_list[free_idx].next;
+
+    /* Add to symbol table */
+    mm->symrgtbl[rgid].rg_start = *alloc_addr;
+    mm->symrgtbl[rgid].rg_end = *alloc_addr + pool->size;
+    mm->symrgtbl[rgid].vmaid = vmaid;
+    mm->symrgtbl[rgid].mode_bit = 0;
 
     pthread_mutex_unlock(&mmvm_lock);
     return 0;
