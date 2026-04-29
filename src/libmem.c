@@ -1021,7 +1021,7 @@ int free_pcb_memph(struct pcb_t *caller) // TODO: review concept of demand pagin
     while (vma != NULL)
     {
         for (addr_t vaddr = vma->vm_start; vaddr < vma->vm_end; vaddr+=PAGING64_PAGESZ) {
-            addr_t pgn = PAGING_PGN(vaddr);
+            addr_t pgn = PAGING64_PGN(vaddr);
             
             pte = pte_get_entry(caller, pgn);
 
